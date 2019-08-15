@@ -3,6 +3,7 @@ import tensorflow as tf
 from tensorflow.contrib.training import HParams
 
 def default_hparams():
+    # 默认模型参数
     return HParams(
         n_vocab=0,
         n_ctx=1024,
@@ -13,20 +14,24 @@ def default_hparams():
 
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
+    """返回dynamic的形状"""
     static = x.shape.as_list()
     dynamic = tf.shape(x)
     return [dynamic[i] if s is None else s for i, s in enumerate(static)]
 
 def softmax(x, axis=-1):
+    # softmax函数的实现
     x = x - tf.reduce_max(x, axis=axis, keepdims=True)
     ex = tf.exp(x)
     return ex / tf.reduce_sum(ex, axis=axis, keepdims=True)
 
 def gelu(x):
+    # gelu activation function
     return 0.5*x*(1+tf.tanh(np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3))))
 
 def norm(x, scope, *, axis=-1, epsilon=1e-5):
     """Normalize to mean = 0, std = 1, then do a diagonal affine transform."""
+
     with tf.variable_scope(scope):
         n_state = x.shape[-1].value
         g = tf.get_variable('g', [n_state], initializer=tf.constant_initializer(1))
@@ -39,15 +44,19 @@ def norm(x, scope, *, axis=-1, epsilon=1e-5):
 
 def split_states(x, n):
     """Reshape the last dimension of x into [n, x.shape[-1]/n]."""
+    # 把一个state拆开，用于multi-head attention
     *start, m = shape_list(x)
     return tf.reshape(x, start + [n, m//n])
 
 def merge_states(x):
     """Smash the last two dimensions of x into a single dimension."""
+    # 把multi-head attention的多个heads拼接回去
     *start, a, b = shape_list(x)
     return tf.reshape(x, start + [a*b])
 
 def conv1d(x, scope, nf, *, w_init_stdev=0.02):
+    # x: batch_size, sequence, features
+    # 其实我不确定为什么这个要叫conv1d，这就是个线性变换而已
     with tf.variable_scope(scope):
         *start, nx = shape_list(x)
         w = tf.get_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev))
@@ -57,7 +66,7 @@ def conv1d(x, scope, nf, *, w_init_stdev=0.02):
 
 def attention_mask(nd, ns, *, dtype):
     """1's in the lower triangle, counting from the lower right corner.
-
+    左下角的三角形都是1，其余是0，用于生成mask。
     Same as tf.matrix_band_part(tf.ones([nd, ns]), -1, ns-nd), but doesn't produce garbage on TPUs.
     """
     i = tf.range(nd)[:,None]
@@ -74,10 +83,12 @@ def attn(x, scope, n_state, *, past, hparams):
 
     def split_heads(x):
         # From [batch, sequence, features] to [batch, heads, sequence, features]
+        # 拆开heads，并且把heads移动到sequence前面
         return tf.transpose(split_states(x, hparams.n_head), [0, 2, 1, 3])
 
     def merge_heads(x):
         # Reverse of split_heads
+        # 把heads移动到sequence后面，再把heads拼接到一起。
         return merge_states(tf.transpose(x, [0, 2, 1, 3]))
 
     def mask_attn_weights(w):
@@ -90,16 +101,22 @@ def attn(x, scope, n_state, *, past, hparams):
 
     def multihead_attn(q, k, v):
         # q, k, v have shape [batch, heads, sequence, features]
-        w = tf.matmul(q, k, transpose_b=True)
-        w = w * tf.rsqrt(tf.cast(v.shape[-1].value, w.dtype))
+        w = tf.matmul(q, k, transpose_b=True) # [batch, heads, sequence, sequence]
+        # 除以\sqrt{num_features}，让模型稳定
+        w = w * tf.rsqrt(tf.cast(v.shape[-1].value, w.dtype)) 
 
+        # 生成一个下三角形的mask
         w = mask_attn_weights(w)
+        # 对mask做softmax
         w = softmax(w)
+        # 加权平均
         a = tf.matmul(w, v)
         return a
 
     with tf.variable_scope(scope):
-        c = conv1d(x, 'c_attn', n_state*3)
+        # 线性变换成q, k v
+        # 注意这里的conv1d其实就是把最后两个dimension一起做了个线性变换
+        c = conv1d(x, 'c_attn', n_state*3) 
         q, k, v = map(split_heads, tf.split(c, 3, axis=2))
         present = tf.stack([k, v], axis=1)
         if past is not None:
@@ -113,9 +130,12 @@ def attn(x, scope, n_state, *, past, hparams):
 
 
 def mlp(x, scope, n_state, *, hparams):
+    # FFN层
     with tf.variable_scope(scope):
         nx = x.shape[-1].value
+        # 线性变换和gelu
         h = gelu(conv1d(x, 'c_fc', n_state))
+        # 再次线性变换
         h2 = conv1d(h, 'c_proj', nx)
         return h2
 
@@ -123,8 +143,11 @@ def mlp(x, scope, n_state, *, hparams):
 def block(x, scope, *, past, hparams):
     with tf.variable_scope(scope):
         nx = x.shape[-1].value
+        # attention layer 
         a, present = attn(norm(x, 'ln_1'), 'attn', nx, past=past, hparams=hparams)
+        # residual connection
         x = x + a
+        # mlp layer
         m = mlp(norm(x, 'ln_2'), 'mlp', nx*4, hparams=hparams)
         x = x + m
         return x, present

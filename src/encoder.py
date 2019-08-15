@@ -9,6 +9,7 @@ from functools import lru_cache
 def bytes_to_unicode():
     """
     Returns list of utf-8 byte and a corresponding list of unicode strings.
+    返回一个list的utf-8 byte和一个list的unicode string。
     The reversible bpe codes work on unicode strings.
     This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
     When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
